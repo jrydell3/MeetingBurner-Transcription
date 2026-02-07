@@ -5,21 +5,8 @@
  * Updated to use NEW Streaming STT API (/v3/ws endpoint)
  */
 
-import { AssemblyAI, StreamingTranscriber } from 'assemblyai'
+import { StreamingTranscriber } from 'assemblyai'
 import { EventEmitter } from 'events'
-
-let client: AssemblyAI | null = null
-
-function getClient(): AssemblyAI {
-  if (!client) {
-    const apiKey = process.env.ASSEMBLYAI_API_KEY
-    if (!apiKey) {
-      throw new Error('Missing ASSEMBLYAI_API_KEY')
-    }
-    client = new AssemblyAI({ apiKey })
-  }
-  return client
-}
 
 export interface TranscriptResult {
   text: string
@@ -40,17 +27,20 @@ export class AssemblyAIStream extends EventEmitter {
   }
 
   /**
-   * Connect to AssemblyAI real-time transcription (NEW /v3/ws API)
+   * Connect to AssemblyAI real-time transcription (Current API)
    */
   async connect(): Promise<void> {
     if (this.isConnected) return
 
     try {
-      // Generate temporary token for streaming (NEW API requirement)
-      const token = await getClient().realtime.createTemporaryToken({ expires_in: 3600 })
+      const apiKey = process.env.ASSEMBLYAI_API_KEY
+      if (!apiKey) {
+        throw new Error('Missing ASSEMBLYAI_API_KEY')
+      }
 
+      // Use current Streaming API with direct API key
       this.transcriber = new StreamingTranscriber({
-        token,
+        apiKey,
         sampleRate: 16000,
         encoding: 'pcm_s16le',
       })

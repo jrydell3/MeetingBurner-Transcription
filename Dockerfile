@@ -20,6 +20,12 @@ FROM node:20-slim
 
 WORKDIR /app
 
+# Install system dependencies needed by @livekit/rtc-node native bindings
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    openssl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy package files
 COPY package*.json ./
 

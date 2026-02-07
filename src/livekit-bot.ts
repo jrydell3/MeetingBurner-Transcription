@@ -7,7 +7,7 @@
  * Uses @livekit/rtc-node for Node.js server-side compatibility.
  */
 
-import { Room, RoomEvent, RemoteParticipant, RemoteTrack, AudioStream, TrackKind, dispose } from '@livekit/rtc-node'
+import { Room, RoomEvent, RemoteParticipant, RemoteTrack, RemoteTrackPublication, AudioStream, TrackKind, dispose } from '@livekit/rtc-node'
 import { AccessToken } from 'livekit-server-sdk'
 import { EventEmitter } from 'events'
 import { detectVoiceActivity, float32ToInt16, AudioBuffer } from './vad'
@@ -68,7 +68,7 @@ export class LiveKitBot extends EventEmitter {
   }
 
   /**
-   * Join the LiveKit room
+   * Join the LiveKit room with retry logic
    */
   async join(): Promise<void> {
     const livekitUrl = process.env.LIVEKIT_URL
@@ -77,45 +77,53 @@ export class LiveKitBot extends EventEmitter {
     }
 
     const token = await this.generateToken()
+    const maxRetries = 3
 
-    this.room = new Room()
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      this.room = new Room()
+      this.setupRoomEvents()
 
-    // Set up event handlers before connecting
-    this.setupRoomEvents()
+      console.log(`[LiveKitBot] Joining room ${this.roomId} (attempt ${attempt}/${maxRetries})...`)
 
-    console.log(`[LiveKitBot] Joining room ${this.roomId}...`)
+      try {
+        await this.room.connect(livekitUrl, token, {
+          autoSubscribe: true,
+          dynacast: false,
+        })
 
-    // Start connecting - don't await since the promise may not resolve
-    // The connection works even if the promise hangs
-    this.room.connect(livekitUrl, token, {
-      autoSubscribe: true,
-      dynacast: false,
-    }).catch((error) => {
-      console.error(`[LiveKitBot] Connection error:`, error)
-    })
+        console.log(`[LiveKitBot] Connected to room ${this.roomId}`)
+        break
+      } catch (error) {
+        console.error(`[LiveKitBot] Connection attempt ${attempt} failed:`, error)
 
-    // Wait for connection to be established by checking for the Connect callback
-    await new Promise<void>((resolve) => {
-      // Give it 2 seconds for the connection to establish
-      setTimeout(() => {
-        console.log(`[LiveKitBot] Joined room ${this.roomId}`)
-        resolve()
-      }, 2000)
-    })
+        // Clean up failed room
+        try { await this.room.disconnect() } catch { /* ignore */ }
+        this.room = null
 
-    // Debug: Log room state
+        if (attempt === maxRetries) {
+          throw new Error(`Failed to connect to room ${this.roomId} after ${maxRetries} attempts`)
+        }
+
+        // Wait before retry with exponential backoff
+        const delay = attempt * 2000
+        console.log(`[LiveKitBot] Retrying in ${delay}ms...`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+      }
+    }
+
+    if (!this.room) {
+      throw new Error(`Room connection lost for ${this.roomId}`)
+    }
+
+    console.log(`[LiveKitBot] Joined room ${this.roomId} (connected: ${this.room.isConnected})`)
+
+    // Log room state
     const participantCount = this.room.remoteParticipants.size
     console.log(`[LiveKitBot] Found ${participantCount} existing participants`)
 
     // Handle existing participants
     for (const participant of this.room.remoteParticipants.values()) {
       console.log(`[LiveKitBot] Processing existing participant: ${participant.identity} (${participant.name})`)
-
-      // Also check their published tracks
-      for (const [trackSid, publication] of participant.trackPublications) {
-        console.log(`[LiveKitBot]   Track: ${trackSid}, kind: ${publication.kind}, subscribed: ${publication.subscribed}`)
-      }
-
       await this.handleParticipantJoined(participant)
     }
   }
@@ -138,7 +146,7 @@ export class LiveKitBot extends EventEmitter {
 
     this.room.on(RoomEvent.TrackSubscribed, (
       track: RemoteTrack,
-      _publication: any,
+      _publication: RemoteTrackPublication,
       participant: RemoteParticipant
     ) => {
       if (track.kind === TrackKind.KIND_AUDIO) {
@@ -149,7 +157,7 @@ export class LiveKitBot extends EventEmitter {
 
     this.room.on(RoomEvent.TrackUnsubscribed, (
       track: RemoteTrack,
-      _publication: any,
+      _publication: RemoteTrackPublication,
       participant: RemoteParticipant
     ) => {
       if (track.kind === TrackKind.KIND_AUDIO) {
@@ -286,8 +294,8 @@ export class LiveKitBot extends EventEmitter {
         // AudioFrame has a data property with Int16Array audio samples
         await this.processAudioFrame(handler, audioFrame.data, audioFrame.sampleRate)
       }
-    } catch (error: any) {
-      if (error.name !== 'AbortError') {
+    } catch (error) {
+      if (error instanceof Error && error.name !== 'AbortError') {
         console.error(`[LiveKitBot] Error processing audio for ${handler.participantName}:`, error)
       }
     }

@@ -14,6 +14,12 @@ import {
   publishTranscript
 } from './supabase'
 
+// SkillsKit configuration
+const SKILLSKIT_URL = process.env.SKILLSKIT_SESSION_URL || 'http://localhost:3100'
+
+// JR Agent configuration
+const JR_SERVICE_URL = process.env.JR_SERVICE_URL || 'http://localhost:3102'
+
 interface ActiveRoom {
   roomId: string
   bot: LiveKitBot
@@ -85,7 +91,7 @@ class RoomManager {
       if (event.isFinal) {
         // Forward to JR Agent
         try {
-          const response = await fetch('http://localhost:3001/transcript', {
+          const response = await fetch(`${JR_SERVICE_URL}/transcript`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -110,9 +116,9 @@ class RoomManager {
         console.log(`[RoomManager] Active room for ${event.roomId}:`, activeRoom ? `has skillsKitSessionId=${activeRoom.skillsKitSessionId}` : 'NOT FOUND')
         if (activeRoom?.skillsKitSessionId) {
           try {
-            console.log(`[RoomManager] Forwarding to SkillsKit session ${activeRoom.skillsKitSessionId}`)
+            console.log(`[RoomManager] Forwarding to SkillsKit session ${activeRoom.skillsKitSessionId} at ${SKILLSKIT_URL}`)
             const skillsKitResponse = await fetch(
-              `http://localhost:3100/v1/sessions/${activeRoom.skillsKitSessionId}/signals`,
+              `${SKILLSKIT_URL}/v1/sessions/${activeRoom.skillsKitSessionId}/signals`,
               {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
