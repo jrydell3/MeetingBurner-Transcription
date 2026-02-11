@@ -137,11 +137,31 @@ export async function storeTranscriptEvent(event: TranscriptEvent): Promise<void
 }
 
 /**
- * Broadcast a transcript event via Supabase Realtime
- * This is what the UI and agents subscribe to
+ * Broadcast a transcript event via Supabase Realtime.
+ * Reuses a single channel per room to avoid leaking subscriptions.
  */
+const channels: Map<string, ReturnType<SupabaseClient['channel']>> = new Map()
+
+function getChannel(roomId: string) {
+  let channel = channels.get(roomId)
+  if (!channel) {
+    channel = getSupabase().channel(`room:${roomId}:transcript`)
+    channel.subscribe()
+    channels.set(roomId, channel)
+  }
+  return channel
+}
+
+export function removeChannel(roomId: string) {
+  const channel = channels.get(roomId)
+  if (channel) {
+    getSupabase().removeChannel(channel)
+    channels.delete(roomId)
+  }
+}
+
 export async function broadcastTranscript(event: TranscriptEvent): Promise<void> {
-  const channel = getSupabase().channel(`room:${event.roomId}:transcript`)
+  const channel = getChannel(event.roomId)
 
   await channel.send({
     type: 'broadcast',

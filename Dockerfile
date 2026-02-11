@@ -35,8 +35,8 @@ RUN npm ci --only=production
 # Copy built files from builder stage
 COPY --from=builder /app/dist ./dist
 
-# Expose port
-EXPOSE 3002
+# Railway injects PORT (typically 8080); fall back to 3002 locally
+EXPOSE ${PORT:-3002}
 
 # Start the service
 CMD ["npm", "start"]

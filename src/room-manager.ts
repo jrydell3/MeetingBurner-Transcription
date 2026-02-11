@@ -11,7 +11,8 @@ import {
   getRoomSettings,
   createTranscriptionSession,
   completeTranscriptionSession,
-  publishTranscript
+  publishTranscript,
+  removeChannel
 } from './supabase'
 
 // SkillsKit configuration
@@ -32,6 +33,66 @@ interface ActiveRoom {
 class RoomManager {
   private activeRooms: Map<string, ActiveRoom> = new Map()
   private joiningRooms: Set<string> = new Set()
+  private stoppingRooms: Set<string> = new Set()
+
+  /**
+   * Forward a final transcript to an external service.
+   * Failures are logged but never propagated — forwarding is best-effort.
+   */
+  private async forwardTranscript(
+    url: string,
+    label: string,
+    body: object
+  ): Promise<void> {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+      if (!response.ok) {
+        console.log(`[RoomManager] ${label} response: ${response.status}`)
+      }
+    } catch {
+      // External service may not be running — that's fine
+    }
+  }
+
+  /**
+   * Handle a final transcript: forward to JR Agent and SkillsKit
+   */
+  private async handleFinalTranscript(event: TranscriptEvent): Promise<void> {
+    this.forwardTranscript(
+      `${JR_SERVICE_URL}/transcript`,
+      'JR agent',
+      {
+        roomId: event.roomId,
+        transcript: {
+          text: event.text,
+          speaker: event.participantName,
+          confidence: event.confidence,
+          isFinal: true
+        }
+      }
+    )
+
+    const activeRoom = this.activeRooms.get(event.roomId)
+    if (activeRoom?.skillsKitSessionId) {
+      this.forwardTranscript(
+        `${SKILLSKIT_URL}/v1/sessions/${activeRoom.skillsKitSessionId}/signals`,
+        'SkillsKit',
+        {
+          type: 'transcript',
+          data: {
+            text: event.text,
+            speaker: event.participantName,
+            confidence: event.confidence,
+            isFinal: true
+          }
+        }
+      )
+    }
+  }
 
   /**
    * Start transcription for a room
@@ -74,76 +135,19 @@ class RoomManager {
     const sessionId = await createTranscriptionSession(roomId, mode)
     if (!sessionId) {
       console.error(`[RoomManager] Could not create session for room ${roomId}`)
+      this.joiningRooms.delete(roomId)
       return false
     }
 
     // Create and start the bot
     const bot = new LiveKitBot(roomId)
 
-    // Handle transcript events
     bot.on('transcript', async (event: TranscriptEvent) => {
-      // Publish to Supabase (store + broadcast)
       await publishTranscript(event)
-
       console.log(`[RoomManager] ${event.participantName}: "${event.text}"${event.isFinal ? ' (final)' : ''}`)
 
-      // Forward final transcripts to JR agent and SkillsKit
       if (event.isFinal) {
-        // Forward to JR Agent
-        try {
-          const response = await fetch(`${JR_SERVICE_URL}/transcript`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              roomId: event.roomId,
-              transcript: {
-                text: event.text,
-                speaker: event.participantName,
-                confidence: event.confidence,
-                isFinal: true
-              }
-            })
-          })
-          if (!response.ok) {
-            console.log(`[RoomManager] JR agent response: ${response.status}`)
-          }
-        } catch (error) {
-          // JR agent may not be running, that's fine
-        }
-
-        // Forward to SkillsKit
-        const activeRoom = this.activeRooms.get(event.roomId)
-        console.log(`[RoomManager] Active room for ${event.roomId}:`, activeRoom ? `has skillsKitSessionId=${activeRoom.skillsKitSessionId}` : 'NOT FOUND')
-        if (activeRoom?.skillsKitSessionId) {
-          try {
-            console.log(`[RoomManager] Forwarding to SkillsKit session ${activeRoom.skillsKitSessionId} at ${SKILLSKIT_URL}`)
-            const skillsKitResponse = await fetch(
-              `${SKILLSKIT_URL}/v1/sessions/${activeRoom.skillsKitSessionId}/signals`,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  type: 'transcript',
-                  data: {
-                    text: event.text,
-                    speaker: event.participantName,
-                    confidence: event.confidence,
-                    isFinal: true
-                  }
-                })
-              }
-            )
-            if (!skillsKitResponse.ok) {
-              console.log(`[RoomManager] SkillsKit response: ${skillsKitResponse.status}`)
-            } else {
-              console.log(`[RoomManager] SkillsKit accepted transcript`)
-            }
-          } catch (error) {
-            console.error(`[RoomManager] SkillsKit error:`, error)
-          }
-        } else {
-          console.log(`[RoomManager] No SkillsKit session for room ${event.roomId}, skipping forward`)
-        }
+        await this.handleFinalTranscript(event)
       }
     })
 
@@ -186,24 +190,28 @@ class RoomManager {
    */
   async stopRoom(roomId: string): Promise<void> {
     const activeRoom = this.activeRooms.get(roomId)
-    if (!activeRoom) {
-      console.log(`[RoomManager] No active transcription for room ${roomId}`)
-      return
+    if (!activeRoom) return
+
+    // Prevent concurrent stop calls from double-leaving/double-completing
+    if (this.stoppingRooms.has(roomId)) return
+    this.stoppingRooms.add(roomId)
+
+    try {
+      this.activeRooms.delete(roomId)
+
+      const { durationMs, speechDurationMs } = await activeRoom.bot.leave()
+
+      await completeTranscriptionSession(
+        activeRoom.sessionId,
+        durationMs,
+        speechDurationMs
+      )
+
+      removeChannel(roomId)
+      console.log(`[RoomManager] Stopped transcription for room ${roomId}`)
+    } finally {
+      this.stoppingRooms.delete(roomId)
     }
-
-    // Leave the room and get duration stats
-    const { durationMs, speechDurationMs } = await activeRoom.bot.leave()
-
-    // Complete the session record
-    await completeTranscriptionSession(
-      activeRoom.sessionId,
-      durationMs,
-      speechDurationMs
-    )
-
-    this.activeRooms.delete(roomId)
-
-    console.log(`[RoomManager] Stopped transcription for room ${roomId}`)
   }
 
   /**

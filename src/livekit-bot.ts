@@ -319,12 +319,6 @@ export class LiveKitBot extends EventEmitter {
       // Using very low threshold (0.001) to catch quiet audio
       const hasSpeech = detectVoiceActivity(chunk, 0.001)
 
-      // Debug: Log RMS levels occasionally
-      if (Math.random() < 0.02) { // Log ~2% of chunks
-        const rms = chunk.reduce((sum, s) => sum + s * s, 0) / chunk.length
-        console.log(`[VAD] RMS: ${Math.sqrt(rms).toFixed(4)}, speech: ${hasSpeech}`)
-      }
-
       if (hasSpeech) {
         // Reconnect AssemblyAI if connection was closed due to idle
         if (!handler.stream.isActive()) {
