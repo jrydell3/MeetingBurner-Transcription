@@ -149,7 +149,12 @@ class RoomManager {
 
     bot.on('disconnected', () => {
       console.log(`[RoomManager] Bot disconnected from room ${roomId}`)
-      this.stopRoom(roomId)
+      // Only call stopRoom if the room was fully registered (avoids race during join)
+      if (this.activeRooms.has(roomId)) {
+        this.stopRoom(roomId)
+      } else {
+        console.log(`[RoomManager] Ignoring disconnect for room ${roomId} (not yet active, still joining)`)
+      }
     })
 
     try {
@@ -169,6 +174,8 @@ class RoomManager {
       return true
     } catch (error) {
       this.joiningRooms.delete(roomId)
+      // Clean up the bot if join failed
+      try { await bot.leave() } catch { /* ignore cleanup errors */ }
       console.error(`[RoomManager] Failed to start bot for room ${roomId}:`, error)
       return false
     }
